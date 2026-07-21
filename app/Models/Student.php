@@ -33,6 +33,8 @@ class Student extends Model
         'deleted_at',
         'rank',
         'specialty',
+        'serial_no',
+        'middle_name',
     ];
 
     protected $casts = [

@@ -12,7 +12,7 @@ return new class extends Migration
         if (!Schema::hasTable('students')) {
             Schema::create('students', function (Blueprint $table) {
                 $table->id();
-                $table->string('student_id', 50)->unique();
+                $table->string('student_id', 50)->nullable()->unique();
                 $table->string('first_name', 50);
                 $table->string('last_name', 50);
                 $table->string('course', 50)->nullable();

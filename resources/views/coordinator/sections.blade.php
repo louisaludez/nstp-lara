@@ -264,6 +264,86 @@
     </div>
 </div>
 
+<!-- Import Result Modal -->
+<div id="importResultModal"
+     class="fixed inset-0 z-[100] hidden items-center justify-center bg-slate-900/50 backdrop-blur-sm">
+
+    <div class="bg-white w-full max-w-md mx-4 rounded-2xl shadow-2xl overflow-hidden">
+
+        <div class="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
+                <x-icon name="check2" class="w-5 h-5 text-emerald-600" />
+            </div>
+
+            <div>
+                <h3 class="text-lg font-bold text-slate-900">
+                    Import Successful
+                </h3>
+                <p class="text-xs text-slate-500">
+                    Master list processing completed.
+                </p>
+            </div>
+        </div>
+
+        <div class="p-6">
+
+            <p id="importResultMessage"
+               class="text-sm text-slate-600 mb-5">
+                Master list imported successfully.
+            </p>
+
+            <div class="grid grid-cols-3 gap-3">
+
+                <div class="bg-emerald-50 border border-emerald-100 rounded-xl p-4 text-center">
+                    <div id="createdStudentsCount"
+                         class="text-2xl font-bold text-emerald-700">
+                        0
+                    </div>
+
+                    <div class="text-xs text-emerald-600 mt-1">
+                        Created
+                    </div>
+                </div>
+
+                <div class="bg-blue-50 border border-blue-100 rounded-xl p-4 text-center">
+                    <div id="updatedStudentsCount"
+                         class="text-2xl font-bold text-blue-700">
+                        0
+                    </div>
+
+                    <div class="text-xs text-blue-600 mt-1">
+                        Updated
+                    </div>
+                </div>
+
+                <div class="bg-amber-50 border border-amber-100 rounded-xl p-4 text-center">
+                    <div id="skippedStudentsCount"
+                         class="text-2xl font-bold text-amber-700">
+                        0
+                    </div>
+
+                    <div class="text-xs text-amber-600 mt-1">
+                        Skipped
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+
+        <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end">
+
+            <button type="button"
+                    id="closeImportResultModal"
+                    class="px-5 py-2.5 text-sm font-semibold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition">
+                Done
+            </button>
+
+        </div>
+
+    </div>
+</div>
+
 @push('scripts')
     @vite(['resources/js/app.js'])
     <script>

@@ -5,14 +5,17 @@ namespace App\Http\Controllers;
 use App\Models\PortalNotification;
 use App\Models\PortalUser;
 use App\Models\Section;
+use App\Models\Student;
 use App\Support\DashboardMetricsVersion;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class SectionController extends Controller
 {
     /**
      * GET /api/sections
+     *
      * Returns all sections with instructor name and student count.
      */
     public function index(): JsonResponse
@@ -20,191 +23,527 @@ class SectionController extends Controller
         $sections = Section::with('instructor')->get();
 
         $rows = $sections->map(function (Section $s) {
-            // Count students in this section via the enrollments bridge or the section_code column on students
-            $studentCount = \DB::table('students')
-                ->join('enrollments', 'students.student_id', '=', 'enrollments.student_id')
-                ->join('sections as sec', 'sec.id', '=', 'enrollments.section_id')
-                ->where('sec.id', $s->id)
+
+            $studentCount = DB::table('students')
+                ->join(
+                    'enrollments',
+                    'students.student_id',
+                    '=',
+                    'enrollments.student_id'
+                )
+                ->join(
+                    'sections as sec',
+                    'sec.id',
+                    '=',
+                    'enrollments.section_id'
+                )
+                ->where(
+                    'sec.id',
+                    $s->id
+                )
                 ->count();
 
             return [
-                'id'           => $s->id,
-                'code'         => $s->section_name,
-                'program'      => $s->component,
-                'schoolYear'   => $s->school_year,
-                'semester'     => $s->semester,
-                'room'         => $s->room,
-                'schedule'     => $s->schedule,
-                'status'       => $s->status,
-                'instructor'   => $s->instructor_name,
-                'instructor_id'=> $s->instructor_id,
-                'students'     => $studentCount,
+                'id'            => $s->id,
+                'code'          => $s->section_name,
+                'program'       => $s->component,
+                'schoolYear'    => $s->school_year,
+                'semester'      => $s->semester,
+                'room'          => $s->room,
+                'schedule'      => $s->schedule,
+                'status'        => $s->status,
+                'instructor'    => $s->instructor_name,
+                'instructor_id' => $s->instructor_id,
+                'students'      => $studentCount,
             ];
         });
 
         return response()->json($rows);
     }
 
+
     /**
      * POST /api/sections
+     *
      * Create a new section.
      */
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'code'            => 'required|string|max:64|unique:sections,section_name',
-            'program'         => 'nullable|in:CWTS,LTS,ROTC',
-            'school_year'     => 'nullable|string|max:32',
-            'semester'        => 'nullable|string|max:64',
-            'room'            => 'nullable|string|max:64',
-            'schedule'        => 'nullable|string|max:128',
-            'status'          => 'nullable|string|max:32',
-            'instructor_name' => 'nullable|string|max:255',
-            'upload_token'    => 'nullable|string',
-            'students'        => 'nullable|array',
+
+            'code' =>
+                'required|string|max:64|unique:sections,section_name',
+
+            'program' =>
+                'nullable|in:CWTS,LTS,ROTC',
+
+            'school_year' =>
+                'nullable|string|max:32',
+
+            'semester' =>
+                'nullable|string|max:64',
+
+            'room' =>
+                'nullable|string|max:64',
+
+            'schedule' =>
+                'nullable|string|max:128',
+
+            'status' =>
+                'nullable|string|max:32',
+
+            'instructor_name' =>
+                'nullable|string|max:255',
+
+            /*
+             * This is the temporary token created
+             * during class-list comparison.
+             */
+            'upload_token' =>
+                'nullable|string',
+
+            /*
+             * Optional direct students array.
+             */
+            'students' =>
+                'nullable|array',
         ]);
 
+
+        /*
+        |--------------------------------------------------------------------------
+        | FIND INSTRUCTOR
+        |--------------------------------------------------------------------------
+        */
+
         $instructor = null;
+
         if (!empty($data['instructor_name'])) {
-            $instructor = PortalUser::where('name', $data['instructor_name'])
-                ->where('role', 'instructor')
-                ->first();
+
+            $instructor = PortalUser::where(
+                'name',
+                $data['instructor_name']
+            )
+            ->where(
+                'role',
+                'instructor'
+            )
+            ->first();
         }
 
-        \DB::beginTransaction();
+
+        DB::beginTransaction();
+
 
         try {
+
+            /*
+            |--------------------------------------------------------------------------
+            | CREATE SECTION
+            |--------------------------------------------------------------------------
+            */
+
             $section = Section::create([
-                'section_name'  => $data['code'],
-                'component'     => $data['program'] ?? 'CWTS',
-                'school_year'   => $data['school_year'] ?? '2025-2026',
-                'semester'      => $data['semester'] ?? '1st Semester',
-                'room'          => $data['room'] ?? 'TBA',
-                'schedule'      => $data['schedule'] ?? null,
-                'status'        => $data['status'] ?? 'Active',
-                'instructor_id' => $instructor?->id,
+
+                'section_name' =>
+                    $data['code'],
+
+                'component' =>
+                    $data['program'] ?? 'CWTS',
+
+                'school_year' =>
+                    $data['school_year'] ?? '2025-2026',
+
+                'semester' =>
+                    $data['semester'] ?? '1st Semester',
+
+                'room' =>
+                    $data['room'] ?? 'TBA',
+
+                'schedule' =>
+                    $data['schedule'] ?? null,
+
+                'status' =>
+                    $data['status'] ?? 'Active',
+
+                'instructor_id' =>
+                    $instructor?->id,
             ]);
 
+
             $importedCount = 0;
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | OPTION 1
+            |
+            | USE PREVIOUSLY COMPARED CLASS LIST
+            |
+            | The temporary records are already stored in
+            | class_list_students using the upload token.
+            |--------------------------------------------------------------------------
+            */
+
             if (!empty($data['upload_token'])) {
-                // Fetch the matched records from class_list_students
-                $tempStudents = \DB::table('class_list_students')
-                    ->where('section_name', $data['upload_token'])
-                    ->get();
+
+                $tempStudents = DB::table(
+                    'class_list_students'
+                )
+                ->where(
+                    'section_name',
+                    $data['upload_token']
+                )
+                ->get();
+
 
                 foreach ($tempStudents as $ts) {
-                    // Update section_name to the actual new section name
-                    \DB::table('class_list_students')
-                        ->where('id', $ts->id)
-                        ->update([
-                            'section_name' => $section->section_name,
-                            'updated_at'   => now(),
-                        ]);
 
-                    // Sync enrollment for this student in the master database
-                    $student = \App\Models\Student::where('student_id', $ts->student_id)->first();
-                    if ($student) {
-                        \App\Models\Student::syncEnrollment($student->student_id, $section->section_name, null);
-                    }
-                    $importedCount++;
-                }
-            } elseif (!empty($data['students'])) {
-                foreach ($data['students'] as $s) {
-                    $sName = $s['name'] ?? null;
-                    if (!$sName) continue;
-                    
-                    $sNo = $s['studentNo'] ?? null;
-                    if (!$sNo) continue;
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Make sure the temporary record has a Student ID.
+                    |--------------------------------------------------------------------------
+                    */
 
-                    // Match against master list student table
-                    $student = \App\Models\Student::where('student_id', $sNo)->first();
-                    if (!$student) {
-                        // DO NOT STORE new students from class list XLSX if they aren't in masterlist!
+                    if (empty($ts->student_id)) {
                         continue;
                     }
-                    
-                    $parsed = \App\Models\Student::parseName($sName);
-                    
-                    $dobVal = null;
-                    if (!empty($s['dob'])) {
-                        $time = strtotime($s['dob']);
-                        if ($time) {
-                            $dobVal = date('Y-m-d', $time);
-                        }
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Find the master student.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $student = Student::where(
+                        'student_id',
+                        $ts->student_id
+                    )->first();
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Safety check.
+                    |
+                    | Never create an enrollment if the student
+                    | does not exist in the master list.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (!$student) {
+                        continue;
                     }
 
-                    $studentData = [
-                        'first_name' => $parsed['first_name'],
-                        'last_name' => $parsed['last_name'],
-                        'course' => $s['program'] ?? 'BSIT',
-                        'component' => $section->component,
-                        'enrollment_status' => 'Active',
-                        'date_of_birth' => $dobVal,
-                        'place_of_birth' => $s['birthPlace'] ?? null,
-                        'sex' => $s['gender'] ?? 'Female',
-                        'contact_number' => $s['cellNo'] ?? null,
-                        'email' => $s['email'] ?? null,
-                        'complete_address' => $s['address'] ?? null,
-                    ];
 
-                    $student->update($studentData);
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Update class_list_students section name.
+                    |--------------------------------------------------------------------------
+                    */
 
-                    \App\Models\Student::syncEnrollment($student->student_id, $section->section_name, null);
+                    DB::table(
+                        'class_list_students'
+                    )
+                    ->where(
+                        'id',
+                        $ts->id
+                    )
+                    ->update([
 
-                    // Store student specifically in class_list_students table
-                    \DB::table('class_list_students')->insert([
-                        'section_name' => $section->section_name,
-                        'student_id'   => $student->student_id,
-                        'name'         => $sName,
-                        'course'       => $s['program'] ?? null,
-                        'gender'       => $s['gender'] ?? null,
-                        'dob'          => $dobVal,
-                        'place_of_birth'=> $s['birthPlace'] ?? null,
-                        'address'      => $s['address'] ?? null,
-                        'cell_no'      => $s['cellNo'] ?? null,
-                        'email'        => $s['email'] ?? null,
-                        'created_at'   => now(),
-                        'updated_at'   => now(),
+                        'section_name' =>
+                            $section->section_name,
+
+                        'updated_at' =>
+                            now(),
                     ]);
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Sync student enrollment.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    Student::syncEnrollment(
+
+                        $student->student_id,
+
+                        $section->section_name,
+
+                        null
+                    );
+
 
                     $importedCount++;
                 }
             }
 
-            // Fire assignment notification if instructor was provided
+
+            /*
+            |--------------------------------------------------------------------------
+            | OPTION 2
+            |
+            | DIRECT STUDENTS ARRAY
+            |
+            | This is only used if the frontend sends students directly.
+            |--------------------------------------------------------------------------
+            */
+
+            elseif (!empty($data['students'])) {
+
+                foreach ($data['students'] as $s) {
+
+                    $sName =
+                        trim(
+                            $s['name'] ?? ''
+                        );
+
+
+                    if ($sName === '') {
+                        continue;
+                    }
+
+
+                    $sNo =
+                        trim(
+                            $s['studentNo'] ?? ''
+                        );
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | We require a Student ID here.
+                    |
+                    | Records without Student ID should have been resolved
+                    | during compareClassList().
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if ($sNo === '') {
+                        continue;
+                    }
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Find master student.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $student = Student::where(
+                        'student_id',
+                        $sNo
+                    )->first();
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Never create a student from class-list upload.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (!$student) {
+                        continue;
+                    }
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Prevent duplicate class-list records.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $alreadyExists = DB::table(
+                        'class_list_students'
+                    )
+                    ->where(
+                        'section_name',
+                        $section->section_name
+                    )
+                    ->where(
+                        'student_id',
+                        $student->student_id
+                    )
+                    ->exists();
+
+
+                    if ($alreadyExists) {
+                        continue;
+                    }
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Sync enrollment.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    Student::syncEnrollment(
+
+                        $student->student_id,
+
+                        $section->section_name,
+
+                        null
+                    );
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Copy MASTER STUDENT information
+                    | into class_list_students.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    DB::table(
+                        'class_list_students'
+                    )
+                    ->insert([
+
+                        'section_name' =>
+                            $section->section_name,
+
+                        'student_id' =>
+                            $student->student_id,
+
+                        'name' =>
+                            $this->formatStudentName(
+                                $student
+                            ),
+
+                        'course' =>
+                            $this->normalizeCourse(
+                                $student->course
+                            ),
+
+                        'gender' =>
+                            $student->sex,
+
+                        'dob' =>
+                            $this->formatDate(
+                                $student->date_of_birth
+                            ),
+
+                        'place_of_birth' =>
+                            $student->place_of_birth,
+
+                        'address' =>
+                            $student->complete_address,
+
+                        'cell_no' =>
+                            $student->contact_number,
+
+                        'email' =>
+                            $student->email,
+
+                        'created_at' =>
+                            now(),
+
+                        'updated_at' =>
+                            now(),
+                    ]);
+
+
+                    $importedCount++;
+                }
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SEND INSTRUCTOR NOTIFICATION
+            |--------------------------------------------------------------------------
+            */
+
             if ($instructor) {
+
                 PortalNotification::create([
-                    'user_id' => $instructor->id,
-                    'type'    => 'assignment',
-                    'title'   => 'New Section Assigned',
-                    'message' => "You have been assigned to handle section {$section->section_name}. Please check your My Classes page for details.",
-                    'is_read' => false,
+
+                    'user_id' =>
+                        $instructor->id,
+
+                    'type' =>
+                        'assignment',
+
+                    'title' =>
+                        'New Section Assigned',
+
+                    'message' =>
+                        "You have been assigned to handle section " .
+                        "{$section->section_name}. " .
+                        "Please check your My Classes page for details.",
+
+                    'is_read' =>
+                        false,
                 ]);
             }
 
-            \DB::commit();
+
+            /*
+            |--------------------------------------------------------------------------
+            | COMMIT TRANSACTION
+            |--------------------------------------------------------------------------
+            */
+
+            DB::commit();
+
+
             DashboardMetricsVersion::bump();
 
+
             return response()->json([
-                'success' => true,
-                'message' => "Section {$section->section_name} created successfully with {$importedCount} students.",
+
+                'success' =>
+                    true,
+
+                'message' =>
+                    "Section {$section->section_name} created successfully " .
+                    "with {$importedCount} students.",
+
                 'section' => [
-                    'id'         => $section->id,
-                    'code'       => $section->section_name,
-                    'program'    => $section->component,
-                    'schoolYear' => $section->school_year,
-                    'room'       => $section->room,
-                    'status'     => $section->status,
-                    'instructor' => $section->instructor_name,
-                    'students'   => $importedCount,
+
+                    'id' =>
+                        $section->id,
+
+                    'code' =>
+                        $section->section_name,
+
+                    'program' =>
+                        $section->component,
+
+                    'schoolYear' =>
+                        $section->school_year,
+
+                    'room' =>
+                        $section->room,
+
+                    'status' =>
+                        $section->status,
+
+                    'instructor' =>
+                        $section->instructor_name,
+
+                    'students' =>
+                        $importedCount,
                 ],
+
             ], 201);
 
         } catch (\Exception $e) {
-            \DB::rollBack();
+
+            DB::rollBack();
+
+
             return response()->json([
-                'success' => false,
-                'message' => 'Failed to create section: ' . $e->getMessage()
+
+                'success' =>
+                    false,
+
+                'message' =>
+                    'Failed to create section: ' .
+                    $e->getMessage(),
+
             ], 500);
         }
     }
@@ -212,219 +551,1941 @@ class SectionController extends Controller
 
     /**
      * POST /api/sections/assign
-     * Assign an instructor to a section. Creates a notification.
+     *
+     * Assign an instructor to a section.
      */
-    public function assign(Request $request): JsonResponse
-    {
+    public function assign(
+        Request $request
+    ): JsonResponse {
+
         $data = $request->validate([
-            'section_code'    => 'required|string|exists:sections,section_name',
-            'instructor_email'=> 'required|email|exists:portal_users,email',
+
+            'section_code' =>
+                'required|string|exists:sections,section_name',
+
+            'instructor_email' =>
+                'required|email|exists:portal_users,email',
         ]);
 
-        $section    = Section::where('section_name', $data['section_code'])->firstOrFail();
-        $instructor = PortalUser::where('email', $data['instructor_email'])
-                                ->where('role', 'instructor')
-                                ->firstOrFail();
 
-        $section->instructor_id = $instructor->id;
+        $section =
+            Section::where(
+                'section_name',
+                $data['section_code']
+            )
+            ->firstOrFail();
+
+
+        $instructor =
+            PortalUser::where(
+                'email',
+                $data['instructor_email']
+            )
+            ->where(
+                'role',
+                'instructor'
+            )
+            ->firstOrFail();
+
+
+        $section->instructor_id =
+            $instructor->id;
+
         $section->save();
 
-        // Create a notification for the instructor
+
+        /*
+        |--------------------------------------------------------------------------
+        | CREATE NOTIFICATION
+        |--------------------------------------------------------------------------
+        */
+
         PortalNotification::create([
-            'user_id' => $instructor->id,
-            'type'    => 'assignment',
-            'title'   => 'New Section Assigned',
-            'message' => "You have been assigned to handle section {$section->section_name}. Please check your My Classes page for details.",
-            'is_read' => false,
+
+            'user_id' =>
+                $instructor->id,
+
+            'type' =>
+                'assignment',
+
+            'title' =>
+                'New Section Assigned',
+
+            'message' =>
+                "You have been assigned to handle section " .
+                "{$section->section_name}. " .
+                "Please check your My Classes page for details.",
+
+            'is_read' =>
+                false,
         ]);
+
 
         DashboardMetricsVersion::bump();
 
+
         return response()->json([
-            'success'    => true,
-            'section'    => $section->section_name,
-            'instructor' => $instructor->name,
+
+            'success' =>
+                true,
+
+            'section' =>
+                $section->section_name,
+
+            'instructor' =>
+                $instructor->name,
         ]);
     }
 
+
     /**
      * POST /api/sections/compare-class-list
-     * Performs a database-driven comparison between uploaded class list students
-     * and the database master students list using class_list_students.
+     *
+     * Compare an uploaded class list against the master students table.
+     *
+     * EXPECTED EXCEL COLUMNS:
+     *
+     * Student No.
+     * Name
+     * Program
+     *
+     * MATCHING PRIORITY:
+     *
+     * 1. Student No.
+     *
+     * 2. If Student No. is missing:
+     *    Name + Program
+     *
+     * RESULTS:
+     *
+     * matched
+     * needs_review
+     * unmatched
+     *
+     * IMPORTANT:
+     *
+     * This method NEVER creates a new student.
+     *
+     * class_list_students gets the complete student information
+     * from the master students table.
      */
-    public function compareClassList(Request $request): JsonResponse
-    {
+    public function compareClassList(
+        Request $request
+    ): JsonResponse {
+
         $data = $request->validate([
-            'token'    => 'required|string',
-            'students' => 'required|array',
+
+            'token' =>
+                'required|string',
+
+            'students' =>
+                'required|array',
         ]);
 
-        $token = $data['token'];
-        $studentsList = $data['students'];
 
-        \DB::beginTransaction();
+        $token =
+            $data['token'];
+
+
+        $studentsList =
+            $data['students'];
+
+
+        DB::beginTransaction();
+
 
         try {
-            // Delete any existing temp records for this token
-            \DB::table('class_list_students')->where('section_name', $token)->delete();
+
+            /*
+            |--------------------------------------------------------------------------
+            | DELETE PREVIOUS TEMPORARY RECORDS
+            |--------------------------------------------------------------------------
+            */
+
+            DB::table(
+                'class_list_students'
+            )
+            ->where(
+                'section_name',
+                $token
+            )
+            ->delete();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | FETCH MASTER STUDENTS
+            |--------------------------------------------------------------------------
+            */
+
+            $dbStudents =
+                Student::all();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | RESULT ARRAYS
+            |--------------------------------------------------------------------------
+            */
 
             $matchedRows = [];
 
-            // Fetch all db students once to avoid N+1 queries and handle multibyte matching perfectly in PHP
-            $dbStudents = \App\Models\Student::all();
+            $needsReview = [];
 
-            // Helper function to normalize name strings case-insensitively and multibyte-safely
-            $normalizeName = function ($name) {
-                if (!$name) return '';
-                $lower = mb_strtolower($name, 'UTF-8');
-                // Strip all special chars, spaces, commas, and dots but retain alphanumeric characters and ñ
-                return preg_replace('/[^a-z0-9ñ]/u', '', $lower);
-            };
+            $unmatchedRows = [];
 
-            // Query and compare against the XAMPP students table directly
-            foreach ($studentsList as $s) {
-                $sName = $s['name'] ?? null;
-                if (!$sName) continue;
 
-                $sNo = $s['studentNo'] ?? null;
+            /*
+            |--------------------------------------------------------------------------
+            | PROCESS EVERY EXCEL ROW
+            |--------------------------------------------------------------------------
+            */
 
-                $dbStudent = null;
+            foreach (
+                $studentsList as $index => $s
+            ) {
 
-                // 1. Try matching by student ID first
-                if ($sNo) {
-                    $dbStudent = $dbStudents->firstWhere('student_id', $sNo);
+                /*
+                |--------------------------------------------------------------------------
+                | READ ONLY THE THREE EXPECTED EXCEL FIELDS
+                |--------------------------------------------------------------------------
+                */
+
+                $sName =
+                    trim(
+                        $s['name'] ?? ''
+                    );
+
+
+                $sNo =
+                    trim(
+                        $s['studentNo'] ?? ''
+                    );
+
+
+                $program =
+                    trim(
+                        $s['program'] ?? ''
+                    );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | Ignore completely empty rows.
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    $sName === '' &&
+                    $sNo === '' &&
+                    $program === ''
+                ) {
+
+                    continue;
                 }
 
-                // 2. Try matching by exact name format (Last, First Middle)
-                if (!$dbStudent) {
-                    $normUploaded = $normalizeName($sName);
-                    
-                    foreach ($dbStudents as $ds) {
-                        $dsFullName = $ds->last_name . ', ' . $ds->first_name;
-                        $normDb = $normalizeName($dsFullName);
-                        
-                        if ($normUploaded === $normDb) {
-                            $dbStudent = $ds;
-                            break;
-                        }
-                    }
-                }
 
-                // 3. Try matching by reverse name combination (First Last)
-                if (!$dbStudent) {
-                    $normUploaded = $normalizeName($sName);
-                    
-                    foreach ($dbStudents as $ds) {
-                        $dsFullNameRev = $ds->first_name . ' ' . $ds->last_name;
-                        $normDbRev = $normalizeName($dsFullNameRev);
-                        
-                        if ($normUploaded === $normDbRev) {
-                            $dbStudent = $ds;
-                            break;
-                        }
-                    }
-                }
+                /*
+                |--------------------------------------------------------------------------
+                | NAME IS REQUIRED FOR SAFE MATCHING
+                |--------------------------------------------------------------------------
+                */
 
-                // 4. Try matching by Last Name + First Name (ignoring middle initials)
-                if (!$dbStudent) {
-                    $parsed = \App\Models\Student::parseName($sName);
-                    $normUploadedLastFirst = $normalizeName($parsed['last_name'] . $parsed['first_name']);
-                    
-                    foreach ($dbStudents as $ds) {
-                        $normDbLastFirst = $normalizeName($ds->last_name . $ds->first_name);
-                        
-                        if ($normUploadedLastFirst && $normDbLastFirst && (
-                            str_contains($normUploadedLastFirst, $normDbLastFirst) || 
-                            str_contains($normDbLastFirst, $normUploadedLastFirst) ||
-                            $normUploadedLastFirst === $normDbLastFirst
-                        )) {
-                            $dbStudent = $ds;
-                            break;
-                        }
-                    }
-                }
+                if ($sName === '') {
 
-                if ($dbStudent) {
-                    // Update master student if any demographic fields are empty in DB but provided in XLSX
-                    $studentUpdates = [];
-                    
-                    if (empty($dbStudent->place_of_birth) && !empty($s['birthPlace'])) {
-                        $studentUpdates['place_of_birth'] = $s['birthPlace'];
-                        $dbStudent->place_of_birth = $s['birthPlace'];
-                    }
-                    
-                    if (empty($dbStudent->date_of_birth) && !empty($s['dob'])) {
-                        $time = strtotime($s['dob']);
-                        if ($time) {
-                            $formattedDob = date('Y-m-d', $time);
-                            $studentUpdates['date_of_birth'] = $formattedDob;
-                            $dbStudent->date_of_birth = $formattedDob;
-                        }
-                    }
-                    
-                    if (empty($dbStudent->sex) && !empty($s['gender'])) {
-                        $studentUpdates['sex'] = $s['gender'];
-                        $dbStudent->sex = $s['gender'];
-                    }
-                    
-                    if (empty($dbStudent->contact_number) && !empty($s['cellNo'])) {
-                        $studentUpdates['contact_number'] = $s['cellNo'];
-                        $dbStudent->contact_number = $s['cellNo'];
-                    }
-                    
-                    if (empty($dbStudent->complete_address) && !empty($s['address'])) {
-                        $studentUpdates['complete_address'] = $s['address'];
-                        $dbStudent->complete_address = $s['address'];
-                    }
-                    
-                    if (!empty($studentUpdates)) {
-                        $dbStudent->update($studentUpdates);
-                    }
+                    $unmatchedRows[] = [
 
-                    $dobVal = $dbStudent->date_of_birth ? ($dbStudent->date_of_birth instanceof \DateTimeInterface ? $dbStudent->date_of_birth->format('Y-m-d') : $dbStudent->date_of_birth) : null;
-                    
-                    \DB::table('class_list_students')->insert([
-                        'section_name' => $token,
-                        'student_id'   => $dbStudent->student_id,
-                        'name'         => trim($dbStudent->last_name . ', ' . $dbStudent->first_name, ', '),
-                        'course'       => $dbStudent->course ?? $s['program'] ?? null,
-                        'gender'       => $dbStudent->sex ?? $s['gender'] ?? 'Female',
-                        'dob'          => $dobVal,
-                        'place_of_birth'=> $dbStudent->place_of_birth ?? $s['birthPlace'] ?? null,
-                        'address'      => $dbStudent->complete_address ?? $s['address'] ?? null,
-                        'cell_no'      => $dbStudent->contact_number ?? $s['cellNo'] ?? null,
-                        'email'        => $dbStudent->email ?? $s['email'] ?? null,
-                        'created_at'   => now(),
-                        'updated_at'   => now(),
-                    ]);
+                        'row' =>
+                            $index + 1,
 
-                    $matchedRows[] = [
-                        'name'      => trim($dbStudent->last_name . ', ' . $dbStudent->first_name, ', '),
-                        'studentNo' => $dbStudent->student_id,
-                        'gender'    => $dbStudent->sex ?? 'Female',
-                        'dob'       => $dobVal ?? '',
-                        'birthPlace'=> $dbStudent->place_of_birth ?? '',
-                        'address'   => $dbStudent->complete_address ?? '',
-                        'cellNo'    => $dbStudent->contact_number ?? '',
-                        'email'     => $dbStudent->email ?? '',
-                        'program'   => $dbStudent->course ?? '',
+                        'name' =>
+                            '',
+
+                        'studentNo' =>
+                            $sNo ?: null,
+
+                        'program' =>
+                            $program,
+
+                        'reason' =>
+                            'Name is missing from the class list.',
                     ];
+
+                    continue;
                 }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | Normalize Student Number
+                |--------------------------------------------------------------------------
+                */
+
+                if ($sNo === '') {
+                    $sNo = null;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | Normalize Course
+                |--------------------------------------------------------------------------
+                */
+
+                $classListCourse =
+                    $this->normalizeCourse(
+                        $program
+                    );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | CANDIDATES
+                |--------------------------------------------------------------------------
+                */
+
+                $candidates =
+                    collect();
+
+
+                $matchedBy =
+                    null;
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | MATCH 1
+                |
+                | Student ID
+                |
+                | This is the strongest match.
+                |--------------------------------------------------------------------------
+                */
+
+                if ($sNo) {
+
+                    $studentById =
+                        $dbStudents->first(
+                            function (
+                                $student
+                            ) use (
+                                $sNo
+                            ) {
+
+                                return $this->normalizeStudentId(
+                                    $student->student_id
+                                )
+                                ===
+                                $this->normalizeStudentId(
+                                    $sNo
+                                );
+                            }
+                        );
+
+
+                    if ($studentById) {
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | OPTIONAL SAFETY CHECK
+                        |
+                        | If Student ID exists but Name and Program
+                        | are clearly inconsistent, send to review.
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $nameMatches =
+                            $this->studentNameMatches(
+                                $studentById,
+                                $sName
+                            );
+
+
+                        $courseMatches =
+                            $this->courseMatches(
+                                $studentById->course,
+                                $classListCourse
+                            );
+
+
+                        if (
+                            !$nameMatches ||
+                            (
+                                $classListCourse &&
+                                !$courseMatches
+                            )
+                        ) {
+
+                            $needsReview[] = [
+
+                                'row' =>
+                                    $index + 1,
+
+                                'name' =>
+                                    $sName,
+
+                                'studentNo' =>
+                                    $sNo,
+
+                                'program' =>
+                                    $classListCourse,
+
+                                'reason' =>
+                                    'Student ID was found, but the uploaded name or program does not match the master student record.',
+
+                                'candidate' =>
+                                    $this->studentCandidateData(
+                                        $studentById
+                                    ),
+                            ];
+
+                            continue;
+                        }
+
+
+                        $candidates =
+                            collect([
+                                $studentById
+                            ]);
+
+
+                        $matchedBy =
+                            'student_id';
+                    }
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | MATCH 2
+                |
+                | NAME + COURSE
+                |
+                | Only performed when Student No. is missing.
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+    $candidates->isEmpty() &&
+    !$sNo
+) {
+
+    /*
+    |--------------------------------------------------------------------------
+    | MATCH WITHOUT STUDENT ID
+    |
+    | Excel has:
+    | - Name
+    | - Program
+    |
+    | We compare these against the master students table.
+    |--------------------------------------------------------------------------
+    */
+
+    $candidates =
+        $dbStudents->filter(
+            function ($student) use (
+                $sName,
+                $classListCourse
+            ) {
+
+                /*
+                |--------------------------------------------------------------------------
+                | STEP 1: NAME MATCH
+                |--------------------------------------------------------------------------
+                */
+
+                $nameMatches =
+                    $this->studentNameMatches(
+                        $student,
+                        $sName
+                    );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | If name does not match,
+                | this student is not a candidate.
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    !$nameMatches
+                ) {
+
+                    return false;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | STEP 2: COURSE MATCH
+                |
+                | Only check course if Excel provided a Program.
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    !empty($classListCourse)
+                ) {
+
+                    $courseMatches =
+                        $this->courseMatches(
+                            $student->course,
+                            $classListCourse
+                        );
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Name matched but course did not.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        !$courseMatches
+                    ) {
+
+                        return false;
+                    }
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | NAME + COURSE MATCHED
+                |--------------------------------------------------------------------------
+                */
+
+                return true;
+            }
+        )
+        ->values();
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | EXACTLY ONE MATCH
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        $candidates->count() === 1
+    ) {
+
+        $matchedBy =
+            'name_and_course';
+    }
+}   
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | MULTIPLE MATCHES
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    $candidates->count() > 1
+                ) {
+
+                    $needsReview[] = [
+
+                        'row' =>
+                            $index + 1,
+
+                        'name' =>
+                            $sName,
+
+                        'studentNo' =>
+                            $sNo,
+
+                        'program' =>
+                            $classListCourse,
+
+                        'reason' =>
+                            'Multiple students matched the same name and program. Manual selection is required.',
+
+                        'candidates' =>
+                            $candidates
+                                ->map(
+                                    function (
+                                        $student
+                                    ) {
+
+                                        return $this->studentCandidateData(
+                                            $student
+                                        );
+                                    }
+                                )
+                                ->values()
+                                ->toArray(),
+                    ];
+
+
+                    continue;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | NO MATCH
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    $candidates->isEmpty()
+                ) {
+
+                    $unmatchedRows[] = [
+
+                        'row' =>
+                            $index + 1,
+
+                        'name' =>
+                            $sName,
+
+                        'studentNo' =>
+                            $sNo,
+
+                        'program' =>
+                            $classListCourse,
+
+                        'reason' =>
+                            $sNo
+                                ? 'Student ID was not found in the master student list.'
+                                : 'No unique student matched by name and program.',
+                    ];
+
+
+                    continue;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | EXACTLY ONE STUDENT FOUND
+                |--------------------------------------------------------------------------
+                */
+
+                $dbStudent =
+                    $candidates->first();
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | IMPORTANT:
+                |
+                | If Excel had no Student ID,
+                | use the Student ID from the master list.
+                |--------------------------------------------------------------------------
+                */
+
+                $resolvedStudentId =
+                    $dbStudent->student_id;
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | RESOLVE COURSE
+                |--------------------------------------------------------------------------
+                |
+                | Master student course is preferred.
+                |
+                | If master course is empty,
+                | use the normalized Excel program.
+                |--------------------------------------------------------------------------
+                */
+
+                $resolvedCourse =
+                    !empty(
+                        $dbStudent->course
+                    )
+
+                    ? $this->normalizeCourse(
+                        $dbStudent->course
+                    )
+
+                    : $classListCourse;
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | PREVENT DUPLICATE TEMPORARY RECORD
+                |--------------------------------------------------------------------------
+                */
+
+                $alreadyExists =
+                    DB::table(
+                        'class_list_students'
+                    )
+                    ->where(
+                        'section_name',
+                        $token
+                    )
+                    ->where(
+                        'student_id',
+                        $resolvedStudentId
+                    )
+                    ->exists();
+
+
+                if (
+                    $alreadyExists
+                ) {
+
+                    $needsReview[] = [
+
+                        'row' =>
+                            $index + 1,
+
+                        'name' =>
+                            $sName,
+
+                        'studentNo' =>
+                            $sNo,
+
+                        'program' =>
+                            $classListCourse,
+
+                        'reason' =>
+                            'This student appears more than once in the uploaded class list.',
+
+                        'candidate' =>
+                            $this->studentCandidateData(
+                                $dbStudent
+                            ),
+                    ];
+
+
+                    continue;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | INSERT INTO class_list_students
+                |
+                | IMPORTANT:
+                |
+                | These values come from the MASTER students table.
+                |
+                | The Excel only provided:
+                |
+                | Student No.
+                | Name
+                | Program
+                |--------------------------------------------------------------------------
+                */
+
+                DB::table(
+                    'class_list_students'
+                )
+                ->insert([
+
+                    'section_name' =>
+                        $token,
+
+                    'student_id' =>
+                        $resolvedStudentId,
+
+                    'name' =>
+                        $this->formatStudentName(
+                            $dbStudent
+                        ),
+
+                    'course' =>
+                        $resolvedCourse,
+
+                    'gender' =>
+                        $dbStudent->sex,
+
+                    'dob' =>
+                        $this->formatDate(
+                            $dbStudent->date_of_birth
+                        ),
+
+                    'place_of_birth' =>
+                        $dbStudent->place_of_birth,
+
+                    'address' =>
+                        $dbStudent->complete_address,
+
+                    'cell_no' =>
+                        $dbStudent->contact_number,
+
+                    'email' =>
+                        $dbStudent->email,
+
+                    'created_at' =>
+                        now(),
+
+                    'updated_at' =>
+                        now(),
+                ]);
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | ADD TO MATCHED RESULT
+                |--------------------------------------------------------------------------
+                */
+
+                $matchedRows[] = [
+
+                    'row' =>
+                        $index + 1,
+
+                    'name' =>
+                        $this->formatStudentName(
+                            $dbStudent
+                        ),
+
+                    'studentNo' =>
+                        $resolvedStudentId,
+
+                    'gender' =>
+                        $dbStudent->sex
+                        ?? '',
+
+                    'dob' =>
+                        $this->formatDate(
+                            $dbStudent->date_of_birth
+                        )
+                        ?? '',
+
+                    'birthPlace' =>
+                        $dbStudent->place_of_birth
+                        ?? '',
+
+                    'address' =>
+                        $dbStudent->complete_address
+                        ?? '',
+
+                    'cellNo' =>
+                        $dbStudent->contact_number
+                        ?? '',
+
+                    'email' =>
+                        $dbStudent->email
+                        ?? '',
+
+                    'program' =>
+                        $resolvedCourse
+                        ?? '',
+
+                    'matchedBy' =>
+                        $matchedBy,
+                ];
             }
 
-            \DB::commit();
+
+            /*
+            |--------------------------------------------------------------------------
+            | COMMIT
+            |--------------------------------------------------------------------------
+            */
+
+            DB::commit();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | RETURN RESULTS
+            |--------------------------------------------------------------------------
+            */
 
             return response()->json([
-                'success' => true,
-                'matched' => $matchedRows
+
+                'success' =>
+                    true,
+
+                'matched' =>
+                    $matchedRows,
+
+                'needs_review' =>
+                    $needsReview,
+
+                'unmatched' =>
+                    $unmatchedRows,
+
+                'matched_count' =>
+                    count(
+                        $matchedRows
+                    ),
+
+                'needs_review_count' =>
+                    count(
+                        $needsReview
+                    ),
+
+                'unmatched_count' =>
+                    count(
+                        $unmatchedRows
+                    ),
             ]);
 
         } catch (\Exception $e) {
-            \DB::rollBack();
+
+            DB::rollBack();
+
+
             return response()->json([
-                'success' => false,
-                'message' => 'Failed to compare class list: ' . $e->getMessage()
+
+                'success' =>
+                    false,
+
+                'message' =>
+                    'Failed to compare class list: ' .
+                    $e->getMessage(),
+
             ], 500);
         }
+    }
+
+
+    /**
+     * Normalize Student ID.
+     *
+     * Removes spaces and converts to uppercase.
+     */
+    private function normalizeStudentId(
+        ?string $studentId
+    ): string {
+
+        if (!$studentId) {
+            return '';
+        }
+
+
+        return strtoupper(
+            preg_replace(
+                '/\s+/',
+                '',
+                trim(
+                    $studentId
+                )
+            )
+        );
+    }
+
+
+    /**
+     * Normalize name.
+     *
+     * Handles:
+     *
+     * Juan Dela Cruz
+     * Juan, Dela Cruz
+     * Dela Cruz, Juan
+     * Dela Cruz Juan
+     */
+    private function normalizeName(
+        ?string $name
+    ): string {
+
+        if (!$name) {
+            return '';
+        }
+
+
+        $name =
+            mb_strtolower(
+                trim(
+                    $name
+                ),
+                'UTF-8'
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Normalize punctuation
+        |--------------------------------------------------------------------------
+        */
+
+        $name =
+            str_replace(
+                [
+                    ',',
+                    '.',
+                    '-',
+                    '_',
+                ],
+                ' ',
+                $name
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Normalize spaces
+        |--------------------------------------------------------------------------
+        */
+
+        $name =
+            preg_replace(
+                '/\s+/u',
+                ' ',
+                $name
+            );
+
+
+        return trim(
+            $name
+        );
+    }
+
+
+    /**
+     * Compact normalized name.
+     *
+     * Example:
+     *
+     * Juan Dela Cruz
+     * ->
+     * juandelacruz
+     */
+    private function compactName(
+        ?string $name
+    ): string {
+
+        return preg_replace(
+            '/[^a-z0-9ñ]/u',
+            '',
+            $this->normalizeName(
+                $name
+            )
+        );
+    }
+
+
+    /**
+     * Check if uploaded name matches master student.
+     *
+     * Supports:
+     *
+     * Excel:
+     * Juan Dela Cruz
+     *
+     * Database:
+     * Dela Cruz, Juan
+     *
+     * Database:
+     * Juan Dela Cruz
+     */
+    private function studentNameMatches(
+    Student $student,
+    string $uploadedName
+): bool {
+
+    $uploadedName = trim($uploadedName);
+
+    if ($uploadedName === '') {
+        return false;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Normalize helper
+    |--------------------------------------------------------------------------
+    */
+
+    $normalize = function (?string $value): string {
+
+        if (!$value) {
+            return '';
+        }
+
+        $value = mb_strtolower(
+            trim($value),
+            'UTF-8'
+        );
+
+        /*
+        | Convert punctuation to spaces
+        */
+
+        $value = str_replace(
+            [
+                ',',
+                '.',
+                '-',
+                '_',
+            ],
+            ' ',
+            $value
+        );
+
+        /*
+        | Remove duplicate spaces
+        */
+
+        $value = preg_replace(
+            '/\s+/u',
+            ' ',
+            $value
+        );
+
+        return trim($value);
+    };
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Normalize compact version
+    |--------------------------------------------------------------------------
+    */
+
+    $compact = function (?string $value) use ($normalize): string {
+
+        return preg_replace(
+            '/[^a-z0-9ñ]/u',
+            '',
+            $normalize($value)
+        );
+    };
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Database values
+    |--------------------------------------------------------------------------
+    */
+
+    $dbLastName =
+        $compact(
+            $student->last_name
+        );
+
+    $dbFirstName =
+        $compact(
+            $student->first_name
+        );
+
+
+    if (
+        !$dbLastName ||
+        !$dbFirstName
+    ) {
+
+        return false;
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | EXCEL FORMAT
+    |
+    | LAST NAME, FIRST NAME MIDDLE NAME
+    |
+    | Example:
+    |
+    | YAMID, KENNETH JAMES GENOBIAG
+    |
+    | We extract:
+    |
+    | Last Name  = YAMID
+    | First Name = KENNETH
+    |
+    | Middle Name is ignored because
+    | students table has no middle_name column.
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        str_contains(
+            $uploadedName,
+            ','
+        )
+    ) {
+
+        $parts =
+            explode(
+                ',',
+                $uploadedName,
+                2
+            );
+
+
+        $uploadedLastName =
+            $compact(
+                trim(
+                    $parts[0] ?? ''
+                )
+            );
+
+
+        $firstNamePart =
+            trim(
+                $parts[1] ?? ''
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Get first word after comma
+        |
+        | KENNETH JAMES GENOBIAG
+        |
+        | becomes:
+        |
+        | KENNETH
+        |--------------------------------------------------------------------------
+        */
+
+        $firstNameWords =
+            preg_split(
+                '/\s+/u',
+                $firstNamePart
+            );
+
+
+        $uploadedFirstName =
+            $compact(
+                $firstNameWords[0] ?? ''
+            );
+
+
+        return
+            $uploadedLastName ===
+            $dbLastName
+
+            &&
+
+            $uploadedFirstName ===
+            $dbFirstName;
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | FALLBACK FORMAT
+    |
+    | If Excel does not use:
+    |
+    | LAST NAME, FIRST NAME
+    |
+    | Try:
+    |
+    | FIRST NAME LAST NAME
+    |
+    |--------------------------------------------------------------------------
+    */
+
+    $words =
+        preg_split(
+            '/\s+/u',
+            trim($uploadedName)
+        );
+
+
+    if (
+        count($words) < 2
+    ) {
+
+        return false;
+    }
+
+
+    $uploadedFirstName =
+        $compact(
+            $words[0]
+        );
+
+
+    $uploadedLastName =
+        $compact(
+            $words[
+                count($words) - 1
+            ]
+        );
+
+
+    return
+        $uploadedFirstName ===
+        $dbFirstName
+
+        &&
+
+        $uploadedLastName ===
+        $dbLastName;
+}
+
+
+    /**
+     * Check whether two courses match
+     * after normalization.
+     */
+    private function courseMatches(
+        ?string $dbCourse,
+        ?string $uploadedCourse
+    ): bool {
+
+        /*
+        |--------------------------------------------------------------------------
+        | If Excel program is empty,
+        | do not reject the match based on course.
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !$uploadedCourse
+        ) {
+
+            return true;
+        }
+
+
+        if (
+            !$dbCourse
+        ) {
+
+            return false;
+        }
+
+
+        $normalizedDbCourse =
+            $this->normalizeCourse(
+                $dbCourse
+            );
+
+
+        $normalizedUploadedCourse =
+            $this->normalizeCourse(
+                $uploadedCourse
+            );
+
+
+        return
+            $normalizedDbCourse ===
+            $normalizedUploadedCourse;
+    }
+
+
+    /**
+     * Format student name for class_list_students.
+     *
+     * Result:
+     *
+     * Last Name, First Name
+     */
+    private function formatStudentName(
+        Student $student
+    ): string {
+
+        $lastName =
+            trim(
+                $student->last_name
+                ?? ''
+            );
+
+
+        $firstName =
+            trim(
+                $student->first_name
+                ?? ''
+            );
+
+
+        if (
+            $lastName &&
+            $firstName
+        ) {
+
+            return
+                $lastName .
+                ', ' .
+                $firstName;
+        }
+
+
+        return
+            $lastName
+            ?: $firstName;
+    }
+
+
+    /**
+     * Format database date.
+     */
+    private function formatDate(
+        $date
+    ): ?string {
+
+        if (!$date) {
+            return null;
+        }
+
+
+        if (
+            $date instanceof \DateTimeInterface
+        ) {
+
+            return $date->format(
+                'Y-m-d'
+            );
+        }
+
+
+        $timestamp =
+            strtotime(
+                $date
+            );
+
+
+        if (
+            $timestamp === false
+        ) {
+
+            return null;
+        }
+
+
+        return date(
+            'Y-m-d',
+            $timestamp
+        );
+    }
+
+
+    /**
+     * Return safe candidate information
+     * for needs_review response.
+     */
+    private function studentCandidateData(
+        Student $student
+    ): array {
+
+        return [
+
+            'id' =>
+                $student->id,
+
+            'student_id' =>
+                $student->student_id,
+
+            'name' =>
+                $this->formatStudentName(
+                    $student
+                ),
+
+            'course' =>
+                $this->normalizeCourse(
+                    $student->course
+                ),
+
+            'date_of_birth' =>
+                $this->formatDate(
+                    $student->date_of_birth
+                ),
+
+            'gender' =>
+                $student->sex,
+
+            'email' =>
+                $student->email,
+        ];
+    }
+
+
+    /**
+     * Normalize course/program names.
+     *
+     * The Excel may contain abbreviations.
+     *
+     * The master students table may contain full course names.
+     *
+     * Both are converted to the same canonical value.
+     */
+    private function normalizeCourse(
+        ?string $course
+    ): ?string {
+
+        if (!$course) {
+            return null;
+        }
+
+
+        $original =
+            trim(
+                $course
+            );
+
+
+        if (
+            $original === ''
+        ) {
+
+            return null;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Uppercase
+        |--------------------------------------------------------------------------
+        */
+
+        $normalized =
+            strtoupper(
+                $original
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Normalize special characters.
+        |--------------------------------------------------------------------------
+        */
+
+        $normalized =
+            str_replace(
+                [
+                    '–',
+                    '—',
+                    '_',
+                    '/',
+                    '\\',
+                ],
+                '-',
+                $normalized
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Normalize spaces.
+        |--------------------------------------------------------------------------
+        */
+
+        $normalized =
+            preg_replace(
+                '/\s+/u',
+                ' ',
+                $normalized
+            );
+
+
+        $normalized =
+            trim(
+                $normalized
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Remove spaces around hyphens.
+        |
+        | BSRM - SPAE
+        | BSRM-SPAE
+        |
+        | become the same.
+        |--------------------------------------------------------------------------
+        */
+
+        $normalized =
+            preg_replace(
+                '/\s*-\s*/',
+                '-',
+                $normalized
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | COURSE MAP
+        |--------------------------------------------------------------------------
+        */
+
+        $courseMap = [
+
+            /*
+            |--------------------------------------------------------------------------
+            | Marine Biology
+            |--------------------------------------------------------------------------
+            */
+
+            'BSMB' =>
+                'Bachelor of Science in Marine Biology',
+
+            'BACHELOR OF SCIENCE IN MARINE BIOLOGY' =>
+                'Bachelor of Science in Marine Biology',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Information Technology
+            |--------------------------------------------------------------------------
+            */
+
+            'BSIT' =>
+                'Bachelor of Science in Information Technology',
+
+            'BACHELOR OF SCIENCE IN INFORMATION TECHNOLOGY' =>
+                'Bachelor of Science in Information Technology',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Information Systems
+            |--------------------------------------------------------------------------
+            */
+
+            'BSIS' =>
+                'Bachelor of Science in Information Systems',
+
+            'BACHELOR OF SCIENCE IN INFORMATION SYSTEM' =>
+                'Bachelor of Science in Information Systems',
+
+            'BACHELOR OF SCIENCE IN INFORMATION SYSTEMS' =>
+                'Bachelor of Science in Information Systems',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Tourism Management
+            |--------------------------------------------------------------------------
+            */
+
+            'BSTM' =>
+                'Bachelor of Science in Tourism Management',
+
+            'BACHELOR OF SCIENCE IN TOURISM MANAGEMENT' =>
+                'Bachelor of Science in Tourism Management',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Disaster and Resilience Management
+            |--------------------------------------------------------------------------
+            */
+
+            'BSDRM' =>
+                'Bachelor of Science in Disaster and Resilience Management',
+
+            'BACHELOR OF SCIENCE IN DISASTER AND RESILIENCE MANAGEMENT' =>
+                'Bachelor of Science in Disaster and Resilience Management',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Entrepreneurship
+            |--------------------------------------------------------------------------
+            */
+
+            'BSENTREP' =>
+                'Bachelor of Science in Entrepreneurship',
+
+            'BSENTREPRENEURSHIP' =>
+                'Bachelor of Science in Entrepreneurship',
+
+            'BACHELOR OF SCIENCE IN ENTREPRENEURSHIP' =>
+                'Bachelor of Science in Entrepreneurship',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Public Administration
+            |--------------------------------------------------------------------------
+            */
+
+            'BPA' =>
+                'Bachelor of Public Administration',
+
+            'BACHELOR OF PUBLIC ADMINISTRATION' =>
+                'Bachelor of Public Administration',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Secondary Education
+            |--------------------------------------------------------------------------
+            */
+
+            'BSED' =>
+                'Bachelor of Secondary Education',
+
+            'BACHELOR OF SECONDARY EDUCATION' =>
+                'Bachelor of Secondary Education',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Secondary Education - Mathematics
+            |--------------------------------------------------------------------------
+            */
+
+            'BSED MATH' =>
+                'Bachelor of Secondary Education major in Mathematics',
+
+            'BSED MATHEMATICS' =>
+                'Bachelor of Secondary Education major in Mathematics',
+
+            'BACHELOR OF SECONDARY EDUCATION MAJOR IN MATHEMATICS' =>
+                'Bachelor of Secondary Education major in Mathematics',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Secondary Education - Science
+            |--------------------------------------------------------------------------
+            */
+
+            'BSED SCIENCE' =>
+                'Bachelor of Secondary Education major in Science',
+
+            'BSED SCI' =>
+                'Bachelor of Secondary Education major in Science',
+
+            'BACHELOR OF SECONDARY EDUCATION MAJOR IN SCIENCE' =>
+                'Bachelor of Secondary Education major in Science',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Social Work
+            |--------------------------------------------------------------------------
+            */
+
+            'BSSW' =>
+                'Bachelor of Science in Social Work',
+
+            'BACHELOR OF SCIENCE IN SOCIAL WORK' =>
+                'Bachelor of Science in Social Work',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Communication
+            |--------------------------------------------------------------------------
+            */
+
+            'BACOMM' =>
+                'Bachelor of Arts in Communication',
+
+            'BA COMM' =>
+                'Bachelor of Arts in Communication',
+
+            'BACHELOR OF ARTS IN COMMUNICATION' =>
+                'Bachelor of Arts in Communication',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Technology and Livelihood Education
+            |--------------------------------------------------------------------------
+            */
+
+            'BTLE' =>
+                'Bachelor of Technology and Livelihood Education',
+
+            'BACHELOR OF TECHNOLOGY AND LIVELIHOOD EDUCATION' =>
+                'Bachelor of Technology and Livelihood Education',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Agro-Forestry
+            |--------------------------------------------------------------------------
+            */
+
+            'BSAF' =>
+                'Bachelor of Science in Agro-Forestry',
+
+            'BSAGROFO' =>
+                'Bachelor of Science in Agro-Forestry',
+
+            'BS AGROFO' =>
+                'Bachelor of Science in Agro-Forestry',
+
+            'BACHELOR OF SCIENCE IN AGRO-FORESTRY' =>
+                'Bachelor of Science in Agro-Forestry',
+
+            'BACHELOR OF SCIENCE IN AGRO FORESTRY' =>
+                'Bachelor of Science in Agro-Forestry',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Physical Education
+            |--------------------------------------------------------------------------
+            */
+
+            'BPE' =>
+                'Bachelor of Physical Education',
+
+            'BACHELOR OF PHYSICAL EDUCATION' =>
+                'Bachelor of Physical Education',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Food Technology
+            |--------------------------------------------------------------------------
+            */
+
+            'BSFT' =>
+                'Bachelor of Science in Food Technology',
+
+            'BACHELOR OF SCIENCE IN FOOD TECHNOLOGY' =>
+                'Bachelor of Science in Food Technology',
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Fisheries and Aquatic Sciences
+            |--------------------------------------------------------------------------
+            */
+
+            'BSFAS' =>
+                'Bachelor of Science in Fisheries and Aquatic Sciences',
+
+            'BACHELOR OF SCIENCE IN FISHERIES AND AQUATIC SCIENCES' =>
+                'Bachelor of Science in Fisheries and Aquatic Sciences',
+        ];
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | DIRECT COURSE MATCH
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            isset(
+                $courseMap[
+                    $normalized
+                ]
+            )
+        ) {
+
+            return $courseMap[
+                $normalized
+            ];
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | SPAE PROGRAMS
+        |--------------------------------------------------------------------------
+        |
+        | Supported:
+        |
+        | BSRM-SPAE
+        | BSRM / SPAE
+        | BSRM SPAE
+        | BSRM_SPAE
+        |
+        |--------------------------------------------------------------------------
+        */
+
+        $spaeNormalized =
+            str_replace(
+                [
+                    ' ',
+                    '/',
+                    '_',
+                    '\\',
+                ],
+                '-',
+                $normalized
+            );
+
+
+        $spaeNormalized =
+            preg_replace(
+                '/-+/u',
+                '-',
+                $spaeNormalized
+            );
+
+
+        $spaeNormalized =
+            trim(
+                $spaeNormalized,
+                '-'
+            );
+
+
+        if (
+            $spaeNormalized ===
+            'BSRM-SPAE'
+        ) {
+
+            return 'BSRM-SPAE';
+        }
+
+
+        if (
+            $spaeNormalized ===
+            'BSDRM-SPAE'
+        ) {
+
+            return 'BSDRM-SPAE';
+        }
+
+
+        if (
+            $spaeNormalized ===
+            'BPA-SPAE'
+        ) {
+
+            return 'BPA-SPAE';
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | UNKNOWN COURSE
+        |--------------------------------------------------------------------------
+        |
+        | IMPORTANT:
+        |
+        | Do not destroy unknown course values.
+        |--------------------------------------------------------------------------
+        */
+
+        return $original;
+    }
+
+
+    /**
+     * Determine NSTP component from section code.
+     */
+    private function componentFromSection(
+        string $sectionCode
+    ): string {
+
+        $upper =
+            strtoupper(
+                $sectionCode
+            );
+
+
+        if (
+            str_contains(
+                $upper,
+                'ROTC'
+            )
+        ) {
+
+            return 'ROTC';
+        }
+
+
+        if (
+            str_contains(
+                $upper,
+                'LTS'
+            )
+        ) {
+
+            return 'LTS';
+        }
+
+
+        return 'CWTS';
     }
 }
